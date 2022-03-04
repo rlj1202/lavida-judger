@@ -270,7 +270,7 @@ judgestatus judge(const judgeoptions* options, judgeresults* results) {
     // validate result
     bool validateResult = false;
 
-    if (options->validaterPath == NULL) {
+    if (options->validaterPath == NULL && options->outputFilePath != NULL) {
         std::stringstream outputFileContent;
         std::stringstream stdoutResult;
 

@@ -90,43 +90,76 @@ int main(int argc, const char* const argv[]) {
 
     judgestatus status = judge(&options, &results);
 
+    if (status != judgestatus::SUCCESS) {
+        char const* msg = "Unknown Error.";
+
+        switch (status) {
+        case judgestatus::INVALID_ARGUMENT:
+            msg = "Invalid argument.";
+            break;
+        case judgestatus::PIPE_FAIL:
+            msg = "Pipe fail.";
+            break;
+        case judgestatus::FORK_FAIL:
+            msg = "Fork fail.";
+            break;
+        case judgestatus::WAIT_FAIL:
+            msg = "Wait fail.";
+            break;
+        case judgestatus::RLIMIT_FAIL:
+            msg = "Rlimit fail.";
+            break;
+        case judgestatus::SECCOMP_FAIL:
+            msg = "Seccomp fail.";
+            break;
+        case judgestatus::EXECVE_FAIL:
+            msg = "Execve fail.";
+            break;
+        case judgestatus::VALIDATE_FAIL:
+            msg = "Validate fail.";
+            break;
+        case judgestatus::NO_INPUT:
+            msg = "No input.";
+            break;
+
+        default:
+            break;
+        }
+
+        dprintf(fileno(stderr), "%s\n", msg);
+
+        return EXIT_FAILURE;
+    }
+
     if (displayJson) {
         printf("{\n");
-        if (status == judgestatus::SUCCESS) {
-            printf("\t\"cputime\": %d,\n", results.cputime);
-            printf("\t\"realtime\": %d,\n", results.realtime);
-            printf("\t\"memory\": %d,\n", results.mem);
-            printf("\t\"exitcode\": %d,\n", results.exitcode);
-            printf("\t\"signal\": %d,\n", results.signal);
-            printf("\t\"graderesult\": %d,\n", (int) results.result);
-        } else {
-            printf("\t\"error\": %d,\n", (int) status);
-        }
+        printf("\t\"cputime\": %d,\n", results.cputime);
+        printf("\t\"realtime\": %d,\n", results.realtime);
+        printf("\t\"memory\": %d,\n", results.mem);
+        printf("\t\"exitcode\": %d,\n", results.exitcode);
+        printf("\t\"signal\": %d,\n", results.signal);
+        printf("\t\"graderesult\": %d\n", (int) results.result);
         printf("}\n");
     } else {
-        if (status == judgestatus::SUCCESS) {
-            printf("cputime: %.4f secs (%d us)\n", results.cputime / 1e6, results.cputime);
-            printf("realtime: %.4f secs (%d us)\n", results.realtime / 1e6, results.realtime);
-            printf("memory: %.2f MB\n", results.mem / 1024.0f / 1024.0f);
+        printf("cputime: %.4f secs (%d us)\n", results.cputime / 1e6, results.cputime);
+        printf("realtime: %.4f secs (%d us)\n", results.realtime / 1e6, results.realtime);
+        printf("memory: %.2f MB\n", results.mem / 1024.0f / 1024.0f);
 
-            printf("exitcode: %d", results.exitcode);
-            if (results.exitcode != 0)
-                printf(" (%s)", strsignal(results.signal));
-            printf("\n");
+        printf("exitcode: %d", results.exitcode);
+        if (results.exitcode != 0)
+            printf(" (%s)", strsignal(results.signal));
+        printf("\n");
 
-            printf("signal: %d\n", results.signal);
+        printf("signal: %d\n", results.signal);
  
-            printf("graderesult: %d (", (int) results.result);
-            if (results.result == graderesult::CORRECT) printf("CORRECT");
-            if (results.result == graderesult::WRONG) printf("WRONG");
-            if (results.result == graderesult::CPU_TIME_LIMIT) printf("CPU TIME LIMIT");
-            if (results.result == graderesult::SEGMENTATION_FAULT) printf("SEG FAULT");
-            if (results.result == graderesult::RUNTIME_ERROR) printf("RUNTIME ERROR");
-            if (results.result == graderesult::BAD_SYSTEM_CALL) printf("BAD SYSTEM CALL");
-            printf(")\n");
-        } else {
-            printf("error: %d\n", (int) status);
-        }
+        printf("graderesult: %d (", (int) results.result);
+        if (results.result == graderesult::CORRECT) printf("CORRECT");
+        if (results.result == graderesult::WRONG) printf("WRONG");
+        if (results.result == graderesult::CPU_TIME_LIMIT) printf("CPU TIME LIMIT");
+        if (results.result == graderesult::SEGMENTATION_FAULT) printf("SEG FAULT");
+        if (results.result == graderesult::RUNTIME_ERROR) printf("RUNTIME ERROR");
+        if (results.result == graderesult::BAD_SYSTEM_CALL) printf("BAD SYSTEM CALL");
+        printf(")\n");
     }
 
     return 0;

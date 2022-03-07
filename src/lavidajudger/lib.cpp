@@ -293,13 +293,15 @@ judgestatus judge(const judgeoptions* options, judgeresults* results) {
 
     judgestatus status = judgestatus::SUCCESS;
 
-    if (WIFEXITED(validaterStatusCode)) {
-        int exitcode = WEXITSTATUS(validaterStatusCode);
-        validateResult = exitcode == EXIT_SUCCESS;
-
-        if (exitcode != EXIT_SUCCESS) status = judgestatus::VALIDATE_FAIL;
-    } else {
-        status = judgestatus::VALIDATE_FAIL;
+    if (options->validaterPath != NULL) {
+        if (WIFEXITED(validaterStatusCode)) {
+            int exitcode = WEXITSTATUS(validaterStatusCode);
+            validateResult = exitcode == EXIT_SUCCESS;
+ 
+            if (exitcode != EXIT_SUCCESS) status = judgestatus::VALIDATE_FAIL;
+        } else {
+            status = judgestatus::VALIDATE_FAIL;
+        }
     }
 
     if (WIFEXITED(workerStatusCode)) {

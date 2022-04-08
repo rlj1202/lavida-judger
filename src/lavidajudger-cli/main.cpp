@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #include <CLI/CLI.hpp>
 #include <CLI/App.hpp>
@@ -11,17 +12,17 @@
 #include "lavidajudger/lavidajudger.h"
 
 template<typename ... Args>
-std::string string_format(const std::string& format, Args ... args) {
+std::string string_format(const std::string& format, Args... args) {
     // Extra space for '\0'
-    int size_s = std::snprintf(nullptr, 0, format.c_str(), args ...) + 1;
-    if( size_s <= 0 ){ throw std::runtime_error( "Error during formatting." ); }
+    int size_s = std::snprintf(nullptr, 0, format.c_str(), args...) + 1;
+    if (size_s <= 0) { throw std::runtime_error( "Error during formatting." ); }
 
-    auto size = static_cast<size_t>( size_s );
-    auto buf = std::make_unique<char[]>( size );
-    std::snprintf( buf.get(), size, format.c_str(), args ... );
+    auto size = static_cast<size_t>(size_s);
+    auto buf = std::make_unique<char[]>(size);
+    std::snprintf(buf.get(), size, format.c_str(), args...);
 
     // We don't want the '\0' inside
-    return std::string( buf.get(), buf.get() + size - 1 );
+    return std::string(buf.get(), buf.get() + size - 1);
 }
 
 int main(int argc, const char* const argv[]) {
@@ -33,14 +34,15 @@ int main(int argc, const char* const argv[]) {
     int memLimit = 1024*1024*256;
 
     std::string execFilePath;
+    std::vector<std::string> execArgs;
     std::string inputFilePath;
     std::string outputFilePath;
     std::string validaterFilePath;
 
     bool displayJson = true;
 
-    app.add_option("--exec-path", execFilePath, "Executable file path.")
-        ->check(CLI::ExistingFile);
+    app.add_option("--exec-path", execFilePath, "Executable file path.");
+    app.add_option("--exec-args", execArgs, "Arguments to executable.");
     app.add_option("--input-path", inputFilePath, "Input file path.")
         ->check(CLI::ExistingFile);
     app.add_option("--output-path", outputFilePath, "Output file path.")
@@ -72,13 +74,22 @@ int main(int argc, const char* const argv[]) {
 
     using namespace lavidajudger;
 
+    std::vector<char*> execArgsCstr;
+    execArgsCstr.push_back(execFilePath.empty() ? nullptr : (char*) execFilePath.c_str());
+    for (std::string& str : execArgs) {
+        execArgsCstr.push_back((char*) str.c_str());
+    }
+    execArgsCstr.push_back(nullptr);
+
     judgeoptions options;
-    judgeresults results;
+    judgeinfo info;
 
     options.type = judgetype::INOUT_FIXED;
 
-    // CAUTION: unsafe const to non-const conversion.
+    // CAUTION: unsafe const to non-const conversion
+    //          due to the absence of const keyword of the old C code.
     options.execpath = execFilePath.empty() ? nullptr : (char*) execFilePath.c_str();
+    options.execArgs = execArgsCstr.data();
     options.inputFilePath = inputFilePath.empty() ? nullptr : (char*) inputFilePath.c_str();
     options.outputFilePath = outputFilePath.empty() ? nullptr : (char*) outputFilePath.c_str();
     options.errFilePath = nullptr;
@@ -88,7 +99,7 @@ int main(int argc, const char* const argv[]) {
     options.reallimit = realLimit;
     options.memlimit = memLimit;
 
-    judgestatus status = judge(&options, &results);
+    judgestatus status = judge(&options, &info);
 
     if (status != judgestatus::SUCCESS) {
         char const* msg = "Unknown Error.";
@@ -121,44 +132,55 @@ int main(int argc, const char* const argv[]) {
         case judgestatus::NO_INPUT:
             msg = "No input.";
             break;
+        case judgestatus::SHM_FAIL:
+            msg = "Shared memory fail.";
+            break;
+        case judgestatus::MAP_FAIL:
+            msg = "Mmap fail.";
+            break;
+        case judgestatus::TRUNCATE_FAIL:
+            msg = "Truncate fail.";
+            break;
 
         default:
             break;
         }
 
-        dprintf(fileno(stderr), "%s\n", msg);
+        dprintf(fileno(stderr), "Judge status : %s\n", msg);
 
         return EXIT_FAILURE;
     }
 
     if (displayJson) {
         printf("{\n");
-        printf("\t\"cputime\": %d,\n", results.cputime);
-        printf("\t\"realtime\": %d,\n", results.realtime);
-        printf("\t\"memory\": %d,\n", results.mem);
-        printf("\t\"exitcode\": %d,\n", results.exitcode);
-        printf("\t\"signal\": %d,\n", results.signal);
-        printf("\t\"graderesult\": %d\n", (int) results.result);
+        printf("\t\"cputime\": %d,\n", info.cputime);
+        printf("\t\"realtime\": %d,\n", info.realtime);
+        printf("\t\"memory\": %d,\n", info.mem);
+        printf("\t\"exitcode\": %d,\n", info.exitcode);
+        printf("\t\"signal\": %d,\n", info.signal);
+        printf("\t\"judgeresult\": %d\n", (int) info.result);
         printf("}\n");
     } else {
-        printf("cputime: %.4f secs (%d us)\n", results.cputime / 1e6, results.cputime);
-        printf("realtime: %.4f secs (%d us)\n", results.realtime / 1e6, results.realtime);
-        printf("memory: %.2f MB\n", results.mem / 1024.0f / 1024.0f);
+        printf("cputime: %.4f secs (%d us)\n", info.cputime / 1e6, info.cputime);
+        printf("realtime: %.4f secs (%d us)\n", info.realtime / 1e6, info.realtime);
+        printf("memory: %.2f MB\n", info.mem / 1024.0f / 1024.0f);
 
-        printf("exitcode: %d", results.exitcode);
-        if (results.exitcode != 0)
-            printf(" (%s)", strsignal(results.signal));
+        printf("exitcode: %d", info.exitcode);
+        if (info.exitcode != 0)
+            printf(" (%s)", strsignal(info.signal));
         printf("\n");
 
-        printf("signal: %d\n", results.signal);
+        printf("signal: %d\n", info.signal);
  
-        printf("graderesult: %d (", (int) results.result);
-        if (results.result == graderesult::CORRECT) printf("CORRECT");
-        if (results.result == graderesult::WRONG) printf("WRONG");
-        if (results.result == graderesult::CPU_TIME_LIMIT) printf("CPU TIME LIMIT");
-        if (results.result == graderesult::SEGMENTATION_FAULT) printf("SEG FAULT");
-        if (results.result == graderesult::RUNTIME_ERROR) printf("RUNTIME ERROR");
-        if (results.result == graderesult::BAD_SYSTEM_CALL) printf("BAD SYSTEM CALL");
+        printf("judgeresult: %d (", (int) info.result);
+        if (info.result == judgeresult::CORRECT) printf("CORRECT");
+        if (info.result == judgeresult::WRONG) printf("WRONG");
+        if (info.result == judgeresult::CPU_TIME_LIMIT) printf("CPU TIME LIMIT");
+        if (info.result == judgeresult::SEGMENTATION_FAULT) printf("SEG FAULT");
+        if (info.result == judgeresult::RUNTIME_ERROR) printf("RUNTIME ERROR");
+        if (info.result == judgeresult::BAD_SYSTEM_CALL) printf("BAD SYSTEM CALL");
+        if (info.result == judgeresult::PRESENTATION_ERROR) printf("PRESENTATION ERROR");
+        if (info.result == judgeresult::PRESENTATION_EXCEED) printf("PRESENTATION EXCEED");
         printf(")\n");
     }
 

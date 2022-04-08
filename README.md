@@ -15,12 +15,18 @@ make install
 
 lavidajudger-cli \
     --exec-path "" \
+    --exec-args "arg1" "arg2" "arg3" "..." \
     --input-path "" \
     --output-path "" \
     --validater-path "" \
     --cpu-limit 1 \
     --real-limit 1 \
     --mem-limit $((256*1024*1024))
+    --json
+```
+
+```sh
+lavidajudger-cli --help
 ```
 
 `--exec-path` must be provided.

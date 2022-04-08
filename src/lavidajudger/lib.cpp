@@ -5,6 +5,9 @@
 #include <errno.h>
 
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <sys/signal.h>
@@ -45,6 +48,31 @@ int setSeccompRules(scmp_filter_ctx &ctx) {
     // if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(read), 1,
     //     SCMP_A0(SCMP_CMP_EQ, 4));
 
+    // TODO: for python3, temporarily.
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(set_tid_address), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(set_robust_list), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigaction), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigprocmask), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(prlimit64), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(futex), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(readlink), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(stat), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getrandom), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sysinfo), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(sigaltstack), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getdents64), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(fcntl), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(ioctl), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(dup), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(geteuid), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getuid), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getegid), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getgid), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(socket), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(connect), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(getcwd), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(lstat), 0);
+
     return rc;
 }
 
@@ -78,13 +106,15 @@ int workerProcess(const judgeoptions* options, judgestatus* status) {
     int rc = 0;
     scmp_filter_ctx ctx = NULL;
 
-    char* const argv[] = { options->execpath, NULL };
+    // char* const argv[] = { options->execpath, NULL };
+    char* const* argv = options->execArgs;
 
-    // ctx = seccomp_init(SCMP_ACT_ERRNO(EPERM));
+    // whitelist method
     ctx = seccomp_init(SCMP_ACT_KILL);
+    // ctx = seccomp_init(SCMP_ACT_ERRNO(EPERM));
 
     if (ctx == NULL) {
-        *status = judgestatus::SECCOMP_FAIL; // TODO: extra info in errno
+        *status = judgestatus::SECCOMP_FAIL; // TODO: extra info is in errno
         return EXIT_FAILURE;
     }
 
@@ -115,7 +145,7 @@ int workerProcess(const judgeoptions* options, judgestatus* status) {
 }
 
 // returns exit code
-int validateProcess(const judgeoptions* options) {
+int validateProcess(const judgeoptions* options, judgestatus* status) {
     if (options->validaterPath == NULL) return 0;
 
     char* const argv[] = {
@@ -126,109 +156,124 @@ int validateProcess(const judgeoptions* options) {
 
     int result;
     if ((result = execve(options->validaterPath, argv, NULL)) == -1) {
-        // TODO:
+        *status = judgestatus::EXECVE_FAIL;
         return EXIT_FAILURE;
     }
 
     return 0;
 }
 
-judgestatus judge(const judgeoptions* options, judgeresults* results) {
+const char SHARED_MEM_NAME[] = "/lavidajudger";
+
+struct shared_mem {
+    judgestatus worker_status;
+    judgestatus validater_status;
+};
+
+judgestatus judge(const judgeoptions* options, judgeinfo* info) {
     // check arguments
     if (options == nullptr) return judgestatus::INVALID_ARGUMENT;
-    if (results == nullptr) return judgestatus::INVALID_ARGUMENT;
+    if (info == nullptr) return judgestatus::INVALID_ARGUMENT;
 
     // init judgeresults struct
-    results->cputime = 0;
-    results->mem = 0;
+    info->cputime = 0;
+    info->mem = 0;
 
-    results->exitcode = 0;
-    results->signal = 0;
+    info->exitcode = 0;
+    info->signal = 0;
+
+    // create shared memory
+    int sharedMemFd = shm_open(SHARED_MEM_NAME, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+    if (sharedMemFd == -1) {
+        return judgestatus::SHM_FAIL;
+    }
+    if (ftruncate(sharedMemFd, sizeof(shared_mem)) == -1) {
+        return judgestatus::TRUNCATE_FAIL;
+    }
+    shared_mem* shared_obj = (shared_mem*) mmap(NULL, sizeof(shared_mem), PROT_READ | PROT_WRITE, MAP_SHARED, sharedMemFd, 0);
+    if (shared_obj == MAP_FAILED) {
+        return judgestatus::MAP_FAIL;
+    }
+    shared_obj->worker_status = judgestatus::SUCCESS;
+    shared_obj->validater_status = judgestatus::SUCCESS;
 
     // creating pipes
     int childOutput[2];
     int childError[2];
-    int childJudgeStatus[2];
 
     int validaterOutput[2];
     int validaterError[2];
 
     if (pipe(childOutput) == -1) return judgestatus::PIPE_FAIL;
     if (pipe(childError) == -1) return judgestatus::PIPE_FAIL;
-    if (pipe(childJudgeStatus) == -1) return judgestatus::PIPE_FAIL;
 
     if (pipe(validaterOutput) == -1) return judgestatus::PIPE_FAIL;
     if (pipe(validaterError) == -1) return judgestatus::PIPE_FAIL;
 
     // create sub processes
+
+    // validater process
     pid_t validaterPid = fork();
 
     if (validaterPid == -1) {
         return judgestatus::FORK_FAIL;
     } else if (validaterPid == 0) {
-        close(childOutput[1]);
-        close(childError[0]);
-        close(childError[1]);
-        close(childJudgeStatus[0]);
-        close(childJudgeStatus[1]);
-        close(validaterOutput[0]);
-        close(validaterError[0]);
-
         dup2(childOutput[0], STDIN_FILENO);
         dup2(validaterOutput[1], STDOUT_FILENO);
         dup2(validaterError[1], STDERR_FILENO);
 
-        int exitcode = validateProcess(options);
-
         close(childOutput[0]);
+        close(childOutput[1]);
+        close(childError[0]);
+        close(childError[1]);
+        close(validaterOutput[0]);
         close(validaterOutput[1]);
+        close(validaterError[0]);
         close(validaterError[1]);
+
+        int exitcode = validateProcess(options, &shared_obj->validater_status);
 
         exit(exitcode);
     }
 
+    // worker process
     pid_t workerPid = fork();
 
     if (workerPid == -1) {
         return judgestatus::FORK_FAIL;
     } else if (workerPid == 0) { // child process, workerProcess
-        close(childOutput[0]);
-        close(childError[0]);
-        close(validaterOutput[1]);
-
-        // connect stdin, stdout and stderr
-        dup2(childOutput[1], STDOUT_FILENO);
-        dup2(childError[1], STDERR_FILENO);
+        int childInput = 0;
 
         if (options->inputFilePath != NULL) {
             FILE* inputFile;
             if ((inputFile = fopen(options->inputFilePath, "r")) != NULL) {
-                dup2(fileno(inputFile), STDIN_FILENO);
+                childInput = fileno(inputFile);
             }
         } else if (options->validaterPath != NULL) {
-            dup2(validaterOutput[0], STDIN_FILENO);
+            childInput = validaterOutput[0];
         } else {
-            judgestatus status = judgestatus::NO_INPUT;
-            close(childJudgeStatus[0]);
-            write(childJudgeStatus[1], &status, sizeof(status));
-            close(childJudgeStatus[1]);
+            shared_obj->worker_status = judgestatus::NO_INPUT;
             
             exit(EXIT_FAILURE);
         }
 
-        // execute worker
-        judgestatus status;
-        int exitcode = workerProcess(options, &status);
+        // connect stdin, stdout and stderr
+        dup2(childInput, STDIN_FILENO);
+        dup2(childOutput[1], STDOUT_FILENO);
+        dup2(childError[1], STDERR_FILENO);
 
-        // pass judge status
-        close(childJudgeStatus[0]);
-        write(childJudgeStatus[1], &status, sizeof(status));
-        close(childJudgeStatus[1]);
-
-        // clean up pipes
+        // clean up useless fds
+        close(childOutput[0]);
         close(childOutput[1]);
+        close(childError[0]);
         close(childError[1]);
+        close(validaterOutput[1]);
         close(validaterOutput[0]);
+        close(validaterError[0]);
+        close(validaterError[1]);
+
+        // execute worker
+        int exitcode = workerProcess(options, &shared_obj->worker_status);
 
         exit(exitcode);
     }
@@ -237,7 +282,6 @@ judgestatus judge(const judgeoptions* options, judgeresults* results) {
 
     close(childOutput[1]);
     close(childError[1]);
-    close(childJudgeStatus[1]);
     close(validaterOutput[1]);
     close(validaterError[1]);
 
@@ -287,6 +331,8 @@ judgestatus judge(const judgeoptions* options, judgeresults* results) {
         while ((readlen = read(childOutput[0], buf, sizeof(buf))) > 0) {
             stdoutResult.write(buf, readlen);
         }
+
+        fprintf(stderr, "stdout: \"%s\"\n", stdoutResult.str().c_str());
  
         validateResult = outputFileContent.str().compare(stdoutResult.str()) == 0;
     }
@@ -305,38 +351,38 @@ judgestatus judge(const judgeoptions* options, judgeresults* results) {
     }
 
     if (WIFEXITED(workerStatusCode)) {
-        results->exitcode = WEXITSTATUS(workerStatusCode);
+        info->exitcode = WEXITSTATUS(workerStatusCode);
 
-        close(childJudgeStatus[1]);
-        if (read(childJudgeStatus[0], &status, sizeof(status)) == 0) {
-            status = judgestatus::SUCCESS;
-        }
-        close(childJudgeStatus[0]);
+        status = shared_obj->worker_status;
 
-        results->result = validateResult ? graderesult::CORRECT : graderesult::WRONG;
+        info->result = validateResult ? judgeresult::CORRECT : judgeresult::WRONG;
     } else {
-        results->exitcode = EXIT_FAILURE;
-        results->signal = WTERMSIG(workerStatusCode);
+        info->exitcode = EXIT_FAILURE;
+        info->signal = WTERMSIG(workerStatusCode);
 
-        results->result = graderesult::RUNTIME_ERROR;
+        info->result = judgeresult::RUNTIME_ERROR;
 
-        if (results->signal == SIGXCPU) {
-            results->result = graderesult::CPU_TIME_LIMIT;
-        } else if (results->signal == SIGSEGV) {
-            results->result = graderesult::SEGMENTATION_FAULT;
-        } else if (results->signal == SIGSYS) {
-            results->result = graderesult::BAD_SYSTEM_CALL;
+        if (info->signal == SIGXCPU) {
+            info->result = judgeresult::CPU_TIME_LIMIT;
+        } else if (info->signal == SIGSEGV) {
+            info->result = judgeresult::SEGMENTATION_FAULT;
+        } else if (info->signal == SIGSYS) {
+            info->result = judgeresult::BAD_SYSTEM_CALL;
         }
     }
 
-    results->cputime =
+    info->cputime =
         workerRscUsage.ru_utime.tv_sec * 1000000 + workerRscUsage.ru_utime.tv_usec;
 
-    results->realtime =
+    info->realtime =
         duration_cast<microseconds>(timeEnd - timeStart).count();
 
-    results->mem =
+    info->mem =
         workerRscUsage.ru_maxrss * 1024; // ru_maxrss = KB unit
+    
+    // clean up shared memory
+    shm_unlink(SHARED_MEM_NAME);
+    close(sharedMemFd);
 
     return status;
 }

@@ -4,4 +4,4 @@ find_package(Threads REQUIRED)
 
 add_library(lavidajudger STATIC lib.cpp ../../include/lavidajudger/lavidajudger.h)
 target_include_directories(lavidajudger PUBLIC ../../include)
-target_link_libraries(lavidajudger seccomp Threads::Threads)
+target_link_libraries(lavidajudger seccomp rt Threads::Threads)

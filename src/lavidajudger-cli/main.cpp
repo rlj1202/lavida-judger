@@ -1,15 +1,15 @@
-#include <stdio.h>
-#include <string.h>
-
+#include <iostream>
 #include <string>
 #include <memory>
 #include <stdexcept>
 #include <vector>
 
-#include <CLI/CLI.hpp>
-#include <CLI/App.hpp>
-
 #include "lavidajudger/lavidajudger.h"
+
+#include "CLI/CLI.hpp"
+#include "CLI/App.hpp"
+
+#include "json/json.h"
 
 template<typename ... Args>
 std::string string_format(const std::string& format, Args... args) {
@@ -33,23 +33,44 @@ int main(int argc, const char* const argv[]) {
     int realLimit = 1;
     int memLimit = 1024*1024*256;
 
+    lavidajudger::judgetype type{lavidajudger::judgetype::NORMAL};
+
     std::string execFilePath;
     std::vector<std::string> execArgs;
+
     std::string inputFilePath;
     std::string outputFilePath;
-    std::string validaterFilePath;
 
-    bool displayJson = true;
+    std::string validatorFilePath;
+    std::vector<std::string> validatorArgs;
 
-    app.add_option("--exec-path", execFilePath, "Executable file path.");
+    std::string policy;
+
+    std::map<std::string, lavidajudger::judgetype> typeMapping{
+        { "normal", lavidajudger::judgetype::NORMAL },
+        { "special", lavidajudger::judgetype::SPECIAL },
+        { "interactive", lavidajudger::judgetype::INTERACTIVE },
+    };
+
+    app.add_option("--type", type, "Judging type")
+        ->transform(CLI::CheckedTransformer(typeMapping, CLI::ignore_case));
+
+    app.add_option("--exec-path", execFilePath, "Executable file path.")
+        ->required();
     app.add_option("--exec-args", execArgs, "Arguments to executable.");
+
     app.add_option("--input-path", inputFilePath, "Input file path.")
         ->check(CLI::ExistingFile);
     app.add_option("--output-path", outputFilePath, "Output file path.")
         ->check(CLI::ExistingFile);
-    app.add_option("--validator-path", validaterFilePath,
-            "Validator executable file path.")
+
+    app.add_option(
+        "--validator-path", validatorFilePath,
+        "Validator executable file path.")
         ->check(CLI::ExistingFile);
+    app.add_option(
+        "--validator-args", validatorArgs,
+        "Arguments to validator.");
 
     app.add_option("--cpu-limit", cpuLimit,
         string_format("CPU time limit in seconds. Default is %d second.",
@@ -66,13 +87,35 @@ int main(int argc, const char* const argv[]) {
             memLimit / 1024 / 1024, memLimit))
         ->check(CLI::NonNegativeNumber);
 
-    app.add_flag("--json,!--no-json", displayJson,
-        string_format("Display results as json output. Default is %s.",
-            displayJson ? "true" : "false"));
+    app.add_option("--policy", policy,
+        "Policy name which is used to sandbox executable.");
 
     CLI11_PARSE(app, argc, argv);
 
+    // Config
     using namespace lavidajudger;
+
+    if (type == judgetype::NORMAL) {
+        if (inputFilePath.empty() || outputFilePath.empty()) {
+            std::cout << "Normal judge needs input file and output file.";
+            std::cout << std::endl;
+            std::cout << "Run with --help for more information." << std::endl;
+            return EXIT_FAILURE;
+        }
+    } else if (type == judgetype::SPECIAL) {
+        if (inputFilePath.empty() || validatorFilePath.empty()) {
+            std::cout << "Special judge needs input file and validator path.";
+            std::cout << std::endl;
+            std::cout << "Run with --help for more information." << std::endl;
+            return EXIT_FAILURE;
+        }
+    } else if (type == judgetype::INTERACTIVE) {
+        if (validatorFilePath.empty()) {
+            std::cout << "Interactive judge needs validator path." << std::endl;
+            std::cout << "Run with --help for more information." << std::endl;
+            return EXIT_FAILURE;
+        }
+    }
 
     std::vector<char*> execArgsCstr;
     execArgsCstr.push_back(execFilePath.empty() ? nullptr : (char*) execFilePath.c_str());
@@ -82,107 +125,51 @@ int main(int argc, const char* const argv[]) {
     execArgsCstr.push_back(nullptr);
 
     judgeoptions options;
-    judgeinfo info;
-
-    options.type = judgetype::INOUT_FIXED;
+    options.type = judgetype::NORMAL;
 
     // CAUTION: unsafe const to non-const conversion
     //          due to the absence of const keyword of the old C code.
     options.execpath = execFilePath.empty() ? nullptr : (char*) execFilePath.c_str();
     options.execArgs = execArgsCstr.data();
+
     options.inputFilePath = inputFilePath.empty() ? nullptr : (char*) inputFilePath.c_str();
     options.outputFilePath = outputFilePath.empty() ? nullptr : (char*) outputFilePath.c_str();
     options.errFilePath = nullptr;
-    options.validaterPath = validaterFilePath.empty() ? nullptr : (char*) validaterFilePath.c_str();
+
+    options.validatorPath = validatorFilePath.empty() ? nullptr : (char*) validatorFilePath.c_str();
+    options.validatorArgs = nullptr;
 
     options.cpulimit = cpuLimit;
     options.reallimit = realLimit;
     options.memlimit = memLimit;
 
+    // Judging
+    judgeinfo info;
     judgestatus status = judge(&options, &info);
 
-    if (status != judgestatus::SUCCESS) {
-        char const* msg = "Unknown Error.";
+    // Print result in json format
+    Json::Value root;
 
-        switch (status) {
-        case judgestatus::INVALID_ARGUMENT:
-            msg = "Invalid argument.";
-            break;
-        case judgestatus::PIPE_FAIL:
-            msg = "Pipe fail.";
-            break;
-        case judgestatus::FORK_FAIL:
-            msg = "Fork fail.";
-            break;
-        case judgestatus::WAIT_FAIL:
-            msg = "Wait fail.";
-            break;
-        case judgestatus::RLIMIT_FAIL:
-            msg = "Rlimit fail.";
-            break;
-        case judgestatus::SECCOMP_FAIL:
-            msg = "Seccomp fail.";
-            break;
-        case judgestatus::EXECVE_FAIL:
-            msg = "Execve fail.";
-            break;
-        case judgestatus::VALIDATE_FAIL:
-            msg = "Validate fail.";
-            break;
-        case judgestatus::NO_INPUT:
-            msg = "No input.";
-            break;
-        case judgestatus::SHM_FAIL:
-            msg = "Shared memory fail.";
-            break;
-        case judgestatus::MAP_FAIL:
-            msg = "Mmap fail.";
-            break;
-        case judgestatus::TRUNCATE_FAIL:
-            msg = "Truncate fail.";
-            break;
+    root["judgestatus"] = (int) status;
+    root["judgestatus_msg"] = judgeStatusToString(status);
 
-        default:
-            break;
-        }
-
-        dprintf(fileno(stderr), "Judge status : %s\n", msg);
-
-        return EXIT_FAILURE;
-    }
-
-    if (displayJson) {
-        printf("{\n");
-        printf("\t\"cputime\": %d,\n", info.cputime);
-        printf("\t\"realtime\": %d,\n", info.realtime);
-        printf("\t\"memory\": %d,\n", info.mem);
-        printf("\t\"exitcode\": %d,\n", info.exitcode);
-        printf("\t\"signal\": %d,\n", info.signal);
-        printf("\t\"judgeresult\": %d\n", (int) info.result);
-        printf("}\n");
-    } else {
-        printf("cputime: %.4f secs (%d us)\n", info.cputime / 1e6, info.cputime);
-        printf("realtime: %.4f secs (%d us)\n", info.realtime / 1e6, info.realtime);
-        printf("memory: %.2f MB\n", info.mem / 1024.0f / 1024.0f);
-
-        printf("exitcode: %d", info.exitcode);
-        if (info.exitcode != 0)
-            printf(" (%s)", strsignal(info.signal));
-        printf("\n");
-
-        printf("signal: %d\n", info.signal);
+    if (status == judgestatus::SUCCESS) {
+        root["cputime"] = info.cputime;
+        root["realtime"] = info.realtime;
+        root["memory"] = info.mem;
  
-        printf("judgeresult: %d (", (int) info.result);
-        if (info.result == judgeresult::CORRECT) printf("CORRECT");
-        if (info.result == judgeresult::WRONG) printf("WRONG");
-        if (info.result == judgeresult::CPU_TIME_LIMIT) printf("CPU TIME LIMIT");
-        if (info.result == judgeresult::SEGMENTATION_FAULT) printf("SEG FAULT");
-        if (info.result == judgeresult::RUNTIME_ERROR) printf("RUNTIME ERROR");
-        if (info.result == judgeresult::BAD_SYSTEM_CALL) printf("BAD SYSTEM CALL");
-        if (info.result == judgeresult::PRESENTATION_ERROR) printf("PRESENTATION ERROR");
-        if (info.result == judgeresult::PRESENTATION_EXCEED) printf("PRESENTATION EXCEED");
-        printf(")\n");
+        root["exitcode"] = info.exitcode;
+ 
+        root["signal"] = info.signal;
+        if (info.signal) root["signal_msg"] = strsignal(info.signal);
+ 
+        root["judgeresult"] = (int) info.result;
+        root["judgeresult_msg"] = judgeResultToString(info.result);
     }
+
+    Json::StreamWriterBuilder builder;
+    const std::string json_file = Json::writeString(builder, root);
+    std::cout << json_file << std::endl;
 
     return 0;
 }

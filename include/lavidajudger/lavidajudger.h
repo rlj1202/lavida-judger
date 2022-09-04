@@ -8,13 +8,11 @@ namespace lavidajudger {
 /**
  * @struct judgetype
  * @brief Type of judging.
- * @deprecated Not used.
  */
 enum class judgetype {
-    INOUT_FIXED, // normal type
-    IN_FIXED,    // special judge
-    OUT_FIXED,
-    DYNAMIC,     // interactive type
+    NORMAL,
+    SPECIAL,
+    INTERACTIVE,
 };
 
 /**
@@ -26,10 +24,15 @@ struct judgeoptions {
 
     char* execpath;
     char** execArgs;
+
     char* inputFilePath;
     char* outputFilePath;
     char* errFilePath;
-    char* validaterPath;
+
+    char* validatorPath;
+    char** validatorArgs;
+
+    char* policy_name;
 
     unsigned int cpulimit;  // in seconds
     unsigned int reallimit; // in seconds
@@ -87,7 +90,11 @@ enum class judgestatus {
     SHM_FAIL,         // Shared memory system call.
     MAP_FAIL,         // `mmap` system call.
     TRUNCATE_FAIL,    // `ftruncate` system call.
+    OPEN_FAIL,        // Open file call.
 };
+
+std::string judgeResultToString(judgeresult result);
+std::string judgeStatusToString(judgestatus status);
 
 /**
  * @brief Judge an executable file.

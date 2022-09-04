@@ -14,12 +14,42 @@
 
 #include <thread>
 #include <chrono>
+#include <string>
 #include <sstream>
 
 // libseccomp
 #include <seccomp.h>
 
+#include "sandboxed_api/sandbox2/sandbox2.h"
+#include "sandboxed_api/sandbox2/executor.h"
+#include "sandboxed_api/sandbox2/policy.h"
+#include "sandboxed_api/sandbox2/policybuilder.h"
+#include "sandboxed_api/sandbox2/util/bpf_helper.h"
+#include "sandboxed_api/util/fileops.h"
+
 namespace lavidajudger {
+
+std::string read_fd(int fd) {
+    std::stringstream ss;
+
+    char buffer[1024];
+    int readlen = 0;
+    while ((readlen = read(fd, buffer, sizeof(buffer))) > 0) {
+        ss.write(buffer, readlen);
+    }
+
+    return ss.str();
+}
+
+std::unique_ptr<sandbox2::Policy> CreatePolicy() {
+    return sandbox2::PolicyBuilder()
+        .AllowDynamicStartup()
+        .AllowRead()
+        .AllowWrite()
+        .AllowExit()
+        .AllowSyscall(__NR_arch_prctl)
+        .BuildOrDie();
+}
 
 int setSeccompRules(scmp_filter_ctx &ctx) {
     int rc = 0;
@@ -32,6 +62,7 @@ int setSeccompRules(scmp_filter_ctx &ctx) {
     if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(write), 1,
         SCMP_A0(SCMP_CMP_EQ, STDERR_FILENO));
     if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(close), 0);
+    if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(uname), 0);
     if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(fstat), 0);
     if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(lseek), 0);
     if (rc == 0) rc = seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(rt_sigreturn), 0);
@@ -146,7 +177,7 @@ int workerProcess(const judgeoptions* options, judgestatus* status) {
 
 // returns exit code
 int validateProcess(const judgeoptions* options, judgestatus* status) {
-    if (options->validaterPath == NULL) return 0;
+    if (options->validatorPath == NULL) return 0;
 
     char* const argv[] = {
         options->inputFilePath,
@@ -155,7 +186,7 @@ int validateProcess(const judgeoptions* options, judgestatus* status) {
         };
 
     int result;
-    if ((result = execve(options->validaterPath, argv, NULL)) == -1) {
+    if ((result = execve(options->validatorPath, argv, NULL)) == -1) {
         *status = judgestatus::EXECVE_FAIL;
         return EXIT_FAILURE;
     }
@@ -175,22 +206,30 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
     if (options == nullptr) return judgestatus::INVALID_ARGUMENT;
     if (info == nullptr) return judgestatus::INVALID_ARGUMENT;
 
-    // init judgeresults struct
+    // init judgeinfo struct
     info->cputime = 0;
+    info->realtime = 0;
     info->mem = 0;
 
     info->exitcode = 0;
     info->signal = 0;
+    info->result = judgeresult::CORRECT;
 
     // create shared memory
-    int sharedMemFd = shm_open(SHARED_MEM_NAME, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+    int sharedMemFd = shm_open(
+        SHARED_MEM_NAME,
+        O_CREAT | O_RDWR, S_IRUSR | S_IWUSR
+    );
     if (sharedMemFd == -1) {
         return judgestatus::SHM_FAIL;
     }
     if (ftruncate(sharedMemFd, sizeof(shared_mem)) == -1) {
         return judgestatus::TRUNCATE_FAIL;
     }
-    shared_mem* shared_obj = (shared_mem*) mmap(NULL, sizeof(shared_mem), PROT_READ | PROT_WRITE, MAP_SHARED, sharedMemFd, 0);
+    shared_mem* shared_obj = (shared_mem*) mmap(
+        NULL, sizeof(shared_mem),
+        PROT_READ | PROT_WRITE, MAP_SHARED, sharedMemFd, 0
+    );
     if (shared_obj == MAP_FAILED) {
         return judgestatus::MAP_FAIL;
     }
@@ -212,7 +251,9 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
 
     // create sub processes
 
-    // validater process
+    /***************************************************************************
+     * Validator process
+     **************************************************************************/
     pid_t validaterPid = fork();
 
     if (validaterPid == -1) {
@@ -236,29 +277,33 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
         exit(exitcode);
     }
 
-    // worker process
+    /***************************************************************************
+     * Worker process
+     **************************************************************************/
     pid_t workerPid = fork();
 
     if (workerPid == -1) {
         return judgestatus::FORK_FAIL;
     } else if (workerPid == 0) { // child process, workerProcess
-        int childInput = 0;
+        int childInputFd = 0;
 
-        if (options->inputFilePath != NULL) {
+        if (options->type == judgetype::NORMAL || options->type == judgetype::SPECIAL) {
+            if (options->inputFilePath == NULL) {
+                shared_obj->worker_status = judgestatus::NO_INPUT;
+
+                exit(EXIT_FAILURE);
+            }
+
             FILE* inputFile;
             if ((inputFile = fopen(options->inputFilePath, "r")) != NULL) {
-                childInput = fileno(inputFile);
+                childInputFd = fileno(inputFile);
             }
-        } else if (options->validaterPath != NULL) {
-            childInput = validaterOutput[0];
-        } else {
-            shared_obj->worker_status = judgestatus::NO_INPUT;
-            
-            exit(EXIT_FAILURE);
+        } else if (options->type == judgetype::INTERACTIVE) {
+            childInputFd = validaterOutput[0];
         }
 
         // connect stdin, stdout and stderr
-        dup2(childInput, STDIN_FILENO);
+        dup2(childInputFd, STDIN_FILENO);
         dup2(childOutput[1], STDOUT_FILENO);
         dup2(childError[1], STDERR_FILENO);
 
@@ -278,7 +323,9 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
         exit(exitcode);
     }
 
-    // parent process
+    /***************************************************************************
+     * Parent process
+     **************************************************************************/
 
     close(childOutput[1]);
     close(childError[1]);
@@ -313,33 +360,19 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
 
     // validate result
     bool validateResult = false;
-
-    if (options->validaterPath == NULL && options->outputFilePath != NULL) {
-        std::stringstream outputFileContent;
-        std::stringstream stdoutResult;
-
-        FILE* outputFile;
-        if ((outputFile = fopen(options->outputFilePath, "r")) != NULL) {
-        }
- 
-        char buf[1024];
-        int readlen;
-
-        while ((readlen = read(fileno(outputFile), buf, sizeof(buf))) > 0) {
-            outputFileContent.write(buf, readlen);
-        }
-        while ((readlen = read(childOutput[0], buf, sizeof(buf))) > 0) {
-            stdoutResult.write(buf, readlen);
-        }
-
-        fprintf(stderr, "stdout: \"%s\"\n", stdoutResult.str().c_str());
- 
-        validateResult = outputFileContent.str().compare(stdoutResult.str()) == 0;
-    }
-
     judgestatus status = judgestatus::SUCCESS;
 
-    if (options->validaterPath != NULL) {
+    if (options->type == judgetype::NORMAL) {
+        FILE* outputFile;
+        if ((outputFile = fopen(options->outputFilePath, "r")) == NULL) {
+            status = judgestatus::OPEN_FAIL;
+        } else {
+            std::string outputFileContent = read_fd(fileno(outputFile));
+            std::string stdoutResult = read_fd(childOutput[0]);
+     
+            validateResult = outputFileContent.compare(stdoutResult) == 0;
+        }
+    } else if (options->type == judgetype::SPECIAL || options->type == judgetype::INTERACTIVE) {
         if (WIFEXITED(validaterStatusCode)) {
             int exitcode = WEXITSTATUS(validaterStatusCode);
             validateResult = exitcode == EXIT_SUCCESS;
@@ -350,12 +383,14 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
         }
     }
 
+    //
     if (WIFEXITED(workerStatusCode)) {
         info->exitcode = WEXITSTATUS(workerStatusCode);
 
         status = shared_obj->worker_status;
 
-        info->result = validateResult ? judgeresult::CORRECT : judgeresult::WRONG;
+        info->result =
+            validateResult ? judgeresult::CORRECT : judgeresult::WRONG;
     } else {
         info->exitcode = EXIT_FAILURE;
         info->signal = WTERMSIG(workerStatusCode);
@@ -372,7 +407,8 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
     }
 
     info->cputime =
-        workerRscUsage.ru_utime.tv_sec * 1000000 + workerRscUsage.ru_utime.tv_usec;
+        workerRscUsage.ru_utime.tv_sec * 1000000
+        + workerRscUsage.ru_utime.tv_usec;
 
     info->realtime =
         duration_cast<microseconds>(timeEnd - timeStart).count();
@@ -385,6 +421,62 @@ judgestatus judge(const judgeoptions* options, judgeinfo* info) {
     close(sharedMemFd);
 
     return status;
+}
+
+std::string judgeResultToString(judgeresult result) {
+    switch (result) {
+    case judgeresult::CORRECT:
+        return "CORRECT";
+    case judgeresult::WRONG:
+        return "WRONG";
+    case judgeresult::CPU_TIME_LIMIT:
+        return "CPU TIME LIMIT";
+    case judgeresult::SEGMENTATION_FAULT:
+        return "SEG FAULT";
+    case judgeresult::RUNTIME_ERROR:
+        return "RUNTIME ERROR";
+    case judgeresult::BAD_SYSTEM_CALL:
+        return "BAD SYSTEM CALL";
+    case judgeresult::PRESENTATION_ERROR:
+        return "PRESENTATION ERROR";
+    case judgeresult::PRESENTATION_EXCEED:
+        return "PRESENTATION EXCEED";
+    default:
+        return "";
+    }
+}
+
+std::string judgeStatusToString(judgestatus status) {
+    switch (status) {
+    case judgestatus::SUCCESS:
+        return "Success";
+    case judgestatus::INVALID_ARGUMENT:
+        return "Invalid argument.";
+    case judgestatus::PIPE_FAIL:
+        return "Pipe fail.";
+    case judgestatus::FORK_FAIL:
+        return "Fork fail.";
+    case judgestatus::WAIT_FAIL:
+        return "Wait fail.";
+    case judgestatus::RLIMIT_FAIL:
+        return "Rlimit fail.";
+    case judgestatus::SECCOMP_FAIL:
+        return "Seccomp fail.";
+    case judgestatus::EXECVE_FAIL:
+        return "Execve fail.";
+    case judgestatus::VALIDATE_FAIL:
+        return "Validate fail.";
+    case judgestatus::NO_INPUT:
+        return "No input.";
+    case judgestatus::SHM_FAIL:
+        return "Shared memory fail.";
+    case judgestatus::MAP_FAIL:
+        return "Mmap fail.";
+    case judgestatus::TRUNCATE_FAIL:
+        return "Truncate fail.";
+    default:
+        return "Unknown Error.";
+    }
 }
 
 }
